@@ -499,7 +499,7 @@ void init_prob()
     // Differentiate to find cell-centered B, and begin normalization
     bsq_max = 0.;
     ZLOOP {
-      geom = get_geometry(i, j, k, CENT) ;
+      geom = get_geometry(i, j, k, CORN);
 
       // Flux-ct
       P[i][j][k][B1] = -(A[i][j] - A[i][j + 1]
