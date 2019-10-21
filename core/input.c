@@ -137,6 +137,7 @@ void set_core_params()
   set_param("sigma_max", &sigma_max);
   set_param("kdotk_tol", &kdotk_tol);
   set_param("Nph_to_track", &Nph_to_track);
+  set_param_optional("tune_emiss_geom", &tune_emiss_geom); tune_emiss_geom = 1.;
   #if GRAYABSORPTION
   set_param("kappa", &kappa);
   #endif
