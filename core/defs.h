@@ -71,6 +71,7 @@ double Rout_rad;
 double nph_per_proc;
 double tune_emiss, t_tune_emiss, dt_tune_emiss;
 double tune_scatt, t_tune_scatt, dt_tune_scatt;
+double tune_emiss_geom;
 int made_tune_proc, abs_tune_proc, scatt_tune_proc;
 double numin_emiss, numax_emiss, numin_spec, numax_spec;
 double kappa;

@@ -15,7 +15,7 @@ double dnzs[N1+2*NG][N2+2*NG][N3+2*NG];
 void sample_photon(int i, int j, int k, double t, double dt,
   double dndlnu[NU_BINS_EMISS+1], struct of_photon *tmp, double Econ[NDIM][NDIM],
   double Ecov[NDIM][NDIM], const struct of_microphysics *m,
-  double Bcon[NDIM], double Ucon[NDIM]);
+  double Bcon[NDIM], double Ucon[NDIM], double geomfactor);
 void get_dndlnu(int i, int j, int k, double dt, double dndlnu[NU_BINS_EMISS+1],
   const struct of_microphysics *m);
 
@@ -54,15 +54,30 @@ void make_superphotons(grid_prim_type Prad, double t, double dt)
     double X[NDIM];
     int nz;
 
+
     ZLOOP
     {
-      nz = (int)dnzs[i][j][k];
+      double dnz, r, th, geomfactor;
+
+      coord(i, j, k, CENT, X);
+      bl_coord(X, &r, &th);
+
+      dnz = dnzs[i][j][k];
+        
+      if (r < 10) {
+        geomfactor = pow(10., tune_emiss_geom) / pow(r, tune_emiss_geom);
+      } else {
+        geomfactor = 1.;
+      }
+
+      dnz *= geomfactor;
+
+      nz = (int)dnz;
       if (dnzs[i][j][k] - nz > get_rand()) nz++;
       //printf("dnzs[%i] = %e\n", i, dnzs[i][j][k]);
 
       if (nz > 0) {
         // Set up zone
-        coord(i, j, k, CENT, X);
         get_fluid_zone(i, j, k, Prad, &m, Ucon, Ucov, Bcon, Bcov);
 
         make_tetrad(i, j, k, Ucon, Bcon, ggeom[i][j][CENT].gcov, Econ, Ecov);
@@ -73,7 +88,7 @@ void make_superphotons(grid_prim_type Prad, double t, double dt)
           tmp = safe_malloc(1, sizeof(struct of_photon));
           tmp->next = safe_malloc(1, sizeof(struct of_photon));
 
-          sample_photon(i, j, k, t, dt, dndlnu, tmp, Econ, Ecov, &m, Bcon, Ucon);
+          sample_photon(i, j, k, t, dt, dndlnu, tmp, Econ, Ecov, &m, Bcon, Ucon, geomfactor);
 
           (tmp->next)->next = head;
           head = tmp;
@@ -97,7 +112,7 @@ void make_superphotons(grid_prim_type Prad, double t, double dt)
 void sample_photon(int i, int j, int k, double t, double dt,
   double dndlnu[NU_BINS_EMISS+1], struct of_photon *ph, double Econ[NDIM][NDIM],
   double Ecov[NDIM][NDIM], const struct of_microphysics *m,
-  double Bcon[NDIM], double Ucon[NDIM])
+  double Bcon[NDIM], double Ucon[NDIM], double geomfactor)
 {
   double nu, th, cth[2], sth[2], phi, sphi[2], cphi[2];
   double K_tetrad[NDIM];
@@ -112,7 +127,7 @@ void sample_photon(int i, int j, int k, double t, double dt,
   } while (get_rand() > linear_interp_log(nu, dndlnu, lnu_min, dlnu));
 
   // Get weight from global weight parameter
-  double weight = get_wgt(nu);
+  double weight = get_wgt(nu) / geomfactor;
 
   // Sample emissivity in solid angle
   double jmax = jnu(nu, m, 0.5*M_PI);
