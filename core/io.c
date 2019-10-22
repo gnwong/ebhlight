@@ -940,6 +940,7 @@ void restart_write(int restart_type)
     WRITE_HDR(t_tune_scatt, TYPE_DBL);
     WRITE_HDR(dt_tune_emiss, TYPE_DBL);
     WRITE_HDR(dt_tune_scatt, TYPE_DBL);
+    WRITE_HDR(tune_emiss_geom, TYPE_DBL);
     WRITE_HDR(made_tune_proc, TYPE_INT);
     WRITE_HDR(abs_tune_proc, TYPE_INT);
     WRITE_HDR(scatt_tune_proc, TYPE_INT);
