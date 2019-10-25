@@ -467,7 +467,7 @@ void init_prob()
                      P[i][j-1][0][RHO] + P[i-1][j-1][0][RHO])
         *(1. + 0.0*(get_rand() - 0.5));
 
-      coord(i, j, k, CENT, X);
+      coord(i, j, k, CORN, X);
       bl_coord(X, &r, &th);
 
       if (N3 > 1) {
@@ -499,7 +499,7 @@ void init_prob()
     // Differentiate to find cell-centered B, and begin normalization
     bsq_max = 0.;
     ZLOOP {
-      geom = get_geometry(i, j, k, CORN);
+      geom = get_geometry(i, j, k, CENT);
 
       // Flux-ct
       P[i][j][k][B1] = -(A[i][j] - A[i][j + 1]
