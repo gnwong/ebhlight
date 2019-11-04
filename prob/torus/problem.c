@@ -10,6 +10,32 @@
 
 #include "io.h"
 
+// 
+//  Notes:
+//    * Use N3 == 1 at your own peril!
+//    * If NO_BFIELD == 1, then we return an initial condition with B{123} = 0.
+//    * If LOW_FLUX == 1, then we multiply q by   sin(M_PI/2. - th)  to flip the field across the midplane.
+//    * I don't know why CLASSIC_BFIELD exists.
+//
+//  Basic structural flow:
+//   (1) Generate FM torus in plasma. Requires rin/rmax be set.
+//   (2) Sweep over fluid zones to find parameters needed for magnetic field initial condition.
+//   (3) Set magnetic field A_phi and q per zone and generate magnetic field primitives.
+//   (4) Update magnetic field primitives according to BHflux.
+//
+//  
+//  The static int "MAD" should be thought of as a "magnetic-field-type" flag. You should not attempt to
+//  read into the numbers. It's not worth it.
+//   MAD == 1:  Standard SANE condition.
+//   MAD == 2:  Standard MAD condition.
+//   MAD == 3:  ??
+//   MAD == 4:  BRR's newer semi-MAD condition where magnetic flux peaks around phi ~ 10-15 (/15, EHT convention).
+//   MAD == 5:  ??
+//   MAD == 6:  Penna, Kulkarni, Narayan 2013 AA 559 A116 (2013) magnetic field initial condition from A1.
+//
+//
+
+
 #define CLASSIC_BFIELD (0)
 #define LOW_FLUX (1)
 
@@ -27,6 +53,9 @@ static double beta;
 static double u_jitter;
 static double rin;
 static double rmax;
+static double Nloops; 
+
+
 void set_problem_params()
 {
   // register required parameters
@@ -75,9 +104,9 @@ void init_prob()
 
   // Magnetic field
   static double A[N1+2*NG][N2+2*NG];
-  double rho_av, rhomax, umax, bsq_ij, bsq_max, q, Nloops;
+  double rho_av, rhomax, umax, bsq_ij, bsq_max, q;
 
-  // Fishbone-Moncrief parameters
+  // Exists.
   if (N3 == 1) {
     fprintf(stderr, "! N3=1, defaulting to MAD=1 initial configuration.\n");
     MAD = 1; // SANE initial field not supported in 2D
@@ -90,28 +119,30 @@ void init_prob()
     Nloops = 4;
   }
 
+  // Also exists.
   #if CLASSIC_BFIELD
   rin = 6.;
   rmax = 12.;
   #endif
 
+  // ================================================================= //
+  //                                                                   //
+  // Generate Fishbone-Moncrief fluid state from rin, rmax conditions. //
+  //                                                                   //
+  // ================================================================= //
+
   l = lfish_calc(rmax);
   kappa = 1.e-3;
-
-  // Plasma beta for initial magnetic field
-  //beta = 1.e2;
 
   rhomax = 0.;
   umax = 0.;
   ZSLOOP(-1, N1, -1, N2, -1, N3) {
+
     #ifdef RHOFL
     P[i][j][k][RHOFL] = 0.;
     P[i][j][k][UUFL] = 0.;
     #endif
-    /*#if ELECTRONS
-    P[i][j][k][RHOFL] = 0.;
-    P[i][j][k][UUFL] = 0.;
-    #endif*/
+
     coord(i, j, k, CENT, X);
     bl_coord(X, &r, &th);
 
@@ -221,17 +252,11 @@ void init_prob()
   return;
   #endif
 
-  // Normalize the densities so that max(rho) = 1
+  // Normalize the densities so that max(rho) = 1. The actual normalization
+  // is performed later so that we don't mess up the command flow of later
+  // legacy code.
   umax = mpi_max(umax);
   rhomax = mpi_max(rhomax);
-  /*ZSLOOP(-1, N1, -1, N2, -1, N3) {
-    P[i][j][k][RHO] /= rhomax;
-    P[i][j][k][UU] /= rhomax;
-  }
-  umax /= rhomax;
-  rhomax = 1.;
-  fixup(P);
-  bound_prim(P);*/
 
 
 #if CLASSIC_BFIELD
@@ -284,8 +309,21 @@ void init_prob()
     P[i][j][k][B2] *= norm;
   }
 #else
-  double rstart, rend;
+
+  // ============================================================================= //
+  //                                                                               //                                                     
+  // Now set up magentic field. This is a three-step process:                      //
+  //                                                                               //
+  //  (1) Run over fluid domain to find useful quantities like extent of the disk. //
+  //  (2) Generate A_phi from q per zone.                                          //
+  //  (3) Add extra BHflux at end.                                                 //
+  //                                                                               //
+  // ============================================================================= //
+
+  // legacy code
   if (MAD == 0) {
+
+    double rstart, rend;
 
     fprintf(stderr, "Nloops = %e\n", Nloops);
 
@@ -450,8 +488,18 @@ void init_prob()
                - A[i + 1][j] - A[i + 1][j + 1]) /
                (2. * dx[1] * geom->g);
     }
-  } else { // MAD
-    ZSLOOP(-1, N1, -1, N2, -1, N3) {
+  } 
+
+
+  if (MAD != 0) { // MAD
+
+    // for MAD==6, TODO: add these to parameter files
+    double MAD6_rstart=0., MAD6_rend=0., MAD6_lambdaB, MAD6_U_rend_midplane, MAD6_frstart;
+    double MAD6_U_midplane[N1+2*NG];
+
+    // normalize density and internal energy. this is done here so as not to mess with 
+    // previous definitions and code flow
+    ZSLOOP(0, N1, 0, N2, 0, 0) {
       P[i][j][k][RHO] /= rhomax;
       P[i][j][k][UU] /= rhomax;
     }
@@ -460,7 +508,30 @@ void init_prob()
     fixup(P);
     bound_prim(P);
 
-    // first find corner-centered vector potential
+    // run through the grid once to identify fluid parameters that might be needed in
+    // setting up the magnetic field.
+    ZSLOOP(0, N1, N2/2, N2/2, 0, 0) {
+      if (MAD == 6) {
+
+        coord(i, j, k, CORN, X);
+        bl_coord(X, &r, &th);
+
+        if ( P[i][j][k][RHO] > 0.2 ) {
+          if (MAD6_rstart == 0.) MAD6_rstart = r;
+        } else {
+          if (MAD6_rstart > 0. && MAD6_rend == 0.) {
+            MAD6_rend = r;
+            MAD6_U_rend_midplane = P[i][j][k][UU];
+          }
+        }
+
+        MAD6_U_midplane[i] = P[i][j][k][UU];
+      }
+    }
+    MAD6_frstart = 1./MAD6_lambdaB * ( pow(MAD6_rstart,2./3) + 15.*pow(MAD6_rstart,-2./5)/8 );
+
+    // now we start to set up the magnetic field by first finding the corner-centered
+    // vector potential.
     ZSLOOP(0, N1, 0, N2, 0, 0) A[i][j] = 0.;
     ZSLOOP(0, N1, 0, N2, 0, 0) {
       rho_av = 0.25*(P[i][j  ][0][RHO] + P[i-1][j  ][0][RHO] +
@@ -471,7 +542,7 @@ void init_prob()
       bl_coord(X, &r, &th);
 
       if (N3 > 1) {
-        //q = pow(sin(th),2)*pow(r/rin,3.)*exp(-r/400)*rho_av/rhomax - 0.2;
+
         if (MAD == 1) {
           q = rho_av/rhomax - 0.2;
         } else if (MAD == 2) {
@@ -482,21 +553,30 @@ void init_prob()
           q = pow(r/rin,2)*rho_av/rhomax - 0.2;
         } else if (MAD == 5) {
           q = pow(r/rin,3)*rho_av/rhomax - 0.2;
+        } else if (MAD == 6) {
+          fr = 1./MAD6_lambdaB * ( pow(r,2./3) + 15.*pow(r,-2./5)/8 );
+          double Uc = P[i][j][k][UU] - MAD6_U_rend_midplane;
+          double Ucm = MAD6_U_midplane[i] - MAD6_U_rend_midplane;
+          q = pow(sin(th), 3.) * (Uc / Ucm - 0.2) / 0.8;
+          if (q < 0) q = 0.;
+          q *= sin( fr - MAD6_frstart );
         } else {
           printf("MAD = %i not supported!\n", MAD);
           exit(-1);
         }
-        //q = pow(r/rin,3.)*rho_av/rhomax - 0.2;
-        //q = rho_av/rhomax - 0.2;
+
       } else {
         q = rho_av/rhomax - 0.2;
       }
+
       A[i][j] = 0.;
-      if (q > 0.)
-        A[i][j] = q;
+      if (q > 0.) A[i][j] = q;
     }
 
-    // Differentiate to find cell-centered B, and begin normalization
+    // given the vector potential A_phi, differentiate to find the cell-centered
+    // values for B. along the way, compute bsq_max for normalization later on.
+    // recall that this normalization is performed to restrict plasma beta into 
+    // a certain range based on the runtime parameter file.
     bsq_max = 0.;
     ZLOOP {
       geom = get_geometry(i, j, k, CENT);
@@ -516,14 +596,23 @@ void init_prob()
     }
     bsq_max = mpi_max(bsq_max);
 
-    // Normalize to set field strength
+    // normalize to set field strength according to input beta parameter.
     double beta_act = (gam - 1.)*umax/(0.5*bsq_max);
     double norm = sqrt(beta_act/beta);
     ZLOOP {
       P[i][j][k][B1] *= norm;
       P[i][j][k][B2] *= norm;
     }
-  } // SANE/MAD
+  } 
+
+
+  // ================================================================= //
+  //                                                                   //
+  // Use this section to add an additional net magnetic field into the //
+  // torus. The strength of this field is set by the BHflux runtime    //
+  // parameter. If BHflux == 0, you can ignore this code.              //
+  //                                                                   //
+  // ================================================================= //
 
   // Initialize a net magnetic field inside the initial torus
   ZSLOOP(0, N1, 0, N2, 0, 0) {
@@ -532,9 +621,7 @@ void init_prob()
     bl_coord(X, &r, &th);
     double x = r*sin(th);
     double z = r*cos(th);
-    //double a_hyp = 20.;
     double a_hyp = rin;
-    //double b_hyp = 60.;
     double b_hyp = 3.*rin;
     double x_hyp = a_hyp*sqrt(1. + pow(z/b_hyp,2));
 
@@ -549,7 +636,6 @@ void init_prob()
   ISLOOP(5, N1-1) {
     JSLOOP(0, N2-1) {
       int jglobal = j - NG + global_start[2];
-      //int j = N2/2+NG;
       int k = NG;
       if (jglobal == N2TOT/2) {
         coord(i, j, k, CENT, X);
@@ -588,6 +674,7 @@ void init_prob()
              - A[i + 1][j] - A[i + 1][j + 1]) /
              (2. * dx[1] * geom->g);
   }
+
 #endif // CLASSIC_BFIELD
 }
 
