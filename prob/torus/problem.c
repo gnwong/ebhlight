@@ -37,7 +37,7 @@
 
 
 #define CLASSIC_BFIELD (0)
-#define LOW_FLUX (1)
+#define LOW_FLUX (0)
 
 // Use this to test the native Fishbone-Moncrief 
 // torus. If (1), it will initialize the B^i:=0.
@@ -67,11 +67,13 @@ void set_problem_params()
   set_param_optional("u_jitter", &u_jitter);
   set_param_optional("rin", &rin);
   set_param_optional("rmax", &rmax);
+  set_param_optional("Nloops", &Nloops);
  
   // set defaults for optional parameters
   u_jitter = 4.e-2;
   rin = 20.;
   rmax = 41.;
+  Nloops = 8.;
 }
 
 void save_problem_params()
@@ -87,6 +89,7 @@ void save_problem_params()
   WRITE_HDR(MAD, TYPE_INT);
   WRITE_HDR(BHflux, TYPE_DBL);
   WRITE_HDR(beta, TYPE_DBL);
+  WRITE_HDR(Nloops, TYPE_DBL);
 
   WRITE_HDR(u_jitter, TYPE_DBL);
   WRITE_HDR(rin, TYPE_DBL);
@@ -115,8 +118,6 @@ void init_prob()
     Nloops = 1;
     DTd *= DTf;
     DTf = 1;
-  } else {
-    Nloops = 4;
   }
 
   // Also exists.
@@ -320,76 +321,108 @@ void init_prob()
   //                                                                               //
   // ============================================================================= //
 
-  // legacy code
+  // Penna+ 2013 - like magnetic field
   if (MAD == 0) {
 
-    double rstart, rend;
+    // print some diagnostic information to the terminal.
+    if (mpi_io_proc()) {
+      fprintf(stderr, "Nloops = %e\n", Nloops);
+    }
 
-    fprintf(stderr, "Nloops = %e\n", Nloops);
+    // default to the 25/550 disk. these numbers set the extent
+    // within which to generate a magnetic field. old values were
+    // 23 -> 374 for 20,41 and 12 -> 84 for 10,21.
+    double rstart = 25.;
+    double rend = 550.;
 
-    int rstart_set = 0, rend_set = 0;
+    // find rstart and rend. normalize along the way.
     ZSLOOP(-1, N1, -1, N2, -1, N3) {
+
+      // normalize rho and uu
       P[i][j][k][RHO] /= rhomax;
       P[i][j][k][UU] /= rhomax;
 
-      // set rstart and rend such that they bound the rho >= 0.2 region at the
-      // midplane
-      if (j == N2/2+NG && P[i][j][k][RHO] > 0.2 && rstart_set == 0) {
-        coord(i, j, k, FACE1, X);
-        bl_coord(X, &rstart, &th);
-        rstart_set = 1;
+      /*
+      // identify rstart and rend by rho > 0.2 condition. only
+      // run this on the true center zone. WARNING: DO NOT USE
+      // THIS METHOD. IT MIGHT END UP OVERRUNNING THE BOUNDS OF
+      // THE SIMULATION!
+      int jglobal = j - NG + global_start[2];
+      if (jglobal == N2TOT/2) {
+        if (trstart==0. && P[i][j][k][RHO] > 0.2) {
+          coord(i,j,k, FACE1, X);
+          bl_coord(X, &rstart, &th);
+        } else if (P[i][j][k][RHO] < 0.2) {
+          coord(i,j,k, CENT, X);
+          bl_coord(X, &rend, &th);
+        }
       }
-
-      coord(i,j,k,CENT,X);
-      bl_coord(X, &r, &th);
-      if (j == N2/2+NG && r/rstart*P[i][j][k][RHO] < 0.2 && rstart_set == 1 &&
-          rend_set == 0) {
-        coord(i+1, j, k, FACE1, X);
-        bl_coord(X, &rend, &th);
-        rend_set = 1;
-      }
+      */
     }
 
-    if (mpi_nprocs() > 1) {
-      if (mpi_io_proc())
-        fprintf(stdout, "MPI nodes > 1: Using hard-coded loop normalization!\n");
-      //rstart = 2.335894e+01;    // These numbers for (20,41)
-      //rend = 3.737892e+02;
-      rstart = 1.175453e+01;    // These numbers for MEDIUM_DISK (10,20)
-      rend = 8.362236e+01 ;
-    } else {
-      printf("rstart = %e rend = %e\n", rstart, rend);
-    }
+    // update rho, uu max values now that they're normalized.
     umax /= rhomax;
     rhomax = 1.;
     fixup(P);
     bound_prim(P);
 
+    // now that we have rstart and rend, and that rho & uu are
+    // properly normalized, find u_cm and u_m[...]
+    double u_cm = 0.;
+    double u_m[N1TOT];
+    ZSLOOP(0, N1, 0, N2, 0, 0) {
+      
+      int iglobal = i - NG + global_start[1];
+      int jglobal = j - NG + global_start[2];
+      if (jglobal == N2TOT/2) {
+        coord(i,j,k, FACE1, X);
+        bl_coord(X, &r, &th);
+        if ( r > rend && u_cm == 0. ) {
+          u_cm = P[i][j][k][UU];
+        }
+        u_m[iglobal] = P[i][j][k][UU];
+      }
+
+    }
+
+    // synchronize u_cm and u_m over all ranks.
+    u_cm = mpi_max(u_cm);
+    for (int i=0; i<N1TOT; ++i) {
+      u_m[i] = mpi_max(u_m[i]);
+    }
+
     // first find corner-centered vector potential
     ZSLOOP(0, N1, 0, N2, 0, 0) A[i][j] = 0.;
     ZSLOOP(0, N1, 0, N2, 0, 0) {
-      //#if N3 > 1
-      //rho_av = 0.25*(P[i][j  ][NG][RHO] + P[i-1][j  ][NG][RHO] +
-      //               P[i][j-1][NG][RHO] + P[i-1][j-1][NG][RHO])
-      //  *(1. + 0.0*(get_rand() - 0.5));
-      //#else
+
       rho_av = 0.25*(P[i][j  ][0][RHO] + P[i-1][j  ][0][RHO] +
                      P[i][j-1][0][RHO] + P[i-1][j-1][0][RHO])
         *(1. + 0.0*(get_rand() - 0.5));
-      //#endif
+
+      double uu_av = 0.25*(P[i][j  ][0][UU] + P[i-1][j  ][0][UU] +
+                           P[i][j-1][0][UU] + P[i-1][j-1][0][UU]);
 
       coord(i, j, k, CORN, X);
       bl_coord(X, &r, &th);
 
-      q = r/rstart*rho_av/rhomax - 0.2;
+      if (1 == 0) {
+        // this is the BRR alternative
+        q = r/rstart*rho_av/rhomax - 0.2;
+      } else {
+        int iglobal = i - NG + global_start[1];
+        double Ucm = u_m[iglobal] - u_cm;
+        double Uc = uu_av - u_cm;
+        q = (Uc/Ucm - 0.2) / 0.8;
+        q *= pow(sin(th), 3.);
+      }
+
       double lamb = (log(rend) - log(rstart))/(M_PI*Nloops);
       A[i][j] = 0.;
       if (r > rstart && r < rend && q > 0.) {
         if (N3 > 1) {
-          #if LOW_FLUX
-          A[i][j] = q*sin(M_PI/2. - th)*sin((log(r) - log(rstart))/lamb);
-          #else
           A[i][j] = q*sin((log(r) - log(rstart))/lamb);
+          #if LOW_FLUX
+          A[i][j] *= sin(M_PI/2. - th);
           #endif
         } else {
           A[i][j] = q;
@@ -397,7 +430,8 @@ void init_prob()
       }
     }
 
-    // Differentiate to find cell-centered B, and begin normalization
+    // differentiate to find cell-centered B, compute bsq_max and beta_max along
+    // the way.
     bsq_max = 0.;
     ZLOOP {
       geom = get_geometry(i, j, k, CENT) ;
@@ -417,64 +451,115 @@ void init_prob()
     }
     bsq_max = mpi_max(bsq_max);
 
-    //if (N3 > 1) {
-    // Normalize loops separately
+    // ================================================================ //
+    // Normalization happens here. One method is to bound beta, another //
+    // is to try to force the total flux to be equal per loop.          //
+    // ===============================================================  //
+
     double ldrloop = (log(rend) - log(rstart))/Nloops;
 
-    // Hardcoded normalization factors
-    //double facs[4] = {1.626547e+00, // rin = 20
-    //               1.902312e+00,
-    //               4.663646e+00,
-    //               2.693245e+01};
-    double facs[4] = {8.336428e-01, // rin = 10
-                      7.255901e-01,
-                      1.546426e+00,
-                      6.495772e+00};
+    if (1 == 0) {
+      // bound by plasma beta
+      double facs[(int)Nloops];
 
-    for (int n = 0; n < Nloops; n++) {
-      double rmin = exp(log(rstart) + n*ldrloop);
-      double rmax = exp(log(rstart) + (n+1)*ldrloop);
-      double beta_min = 1.e100;
-      double bsq_max = 0.;
-      double umax = 0.;
-      ZLOOP {
-        coord(i, j, k, CENT, X);
-        bl_coord(X, &r, &th);
-        if (r > rmin && r < rmax) {
-          // Inside loop
-          geom = get_geometry(i, j, k, CENT);
-          double bsq = bsq_calc(P[i][j][k], geom);
-          if (bsq > bsq_max) bsq_max = bsq;
-          if (P[i][j][k][UU] > umax) umax = P[i][j][k][UU];
-          double beta_ij = (gam - 1.)*P[i][j][k][UU]/(0.5*bsq);
-          if (beta_ij < beta_min) {
-            beta_min = beta_ij;
+      for (int n = 0; n < Nloops; n++) {
+        double rmin = exp(log(rstart) + n*ldrloop);
+        double rmax = exp(log(rstart) + (n+1)*ldrloop);
+        double beta_min = 1.e100;
+        double bsq_max = 0.;
+        double umax = 0.;
+        ZLOOP {
+          coord(i, j, k, CENT, X);
+          bl_coord(X, &r, &th);
+          if (r > rmin && r < rmax) {
+            // Inside loop
+            geom = get_geometry(i, j, k, CENT);
+            double bsq = bsq_calc(P[i][j][k], geom);
+            if (bsq > bsq_max) bsq_max = bsq;
+            if (P[i][j][k][UU] > umax) umax = P[i][j][k][UU];
+            double beta_ij = (gam - 1.)*P[i][j][k][UU]/(0.5*bsq);
+            if (beta_ij < beta_min) {
+              beta_min = beta_ij;
+            }
           }
         }
 
-        // Get beta_min across all MPI nodes for this loop
-      }
-      //bsq_max = mpi_max(bsq_max);
-      //umax = mpi_max(umax);
+        if (mpi_nprocs() == 1) {
+          facs[n] = sqrt(beta_min/beta);
+          printf("fac[%i] = %e\n", n, sqrt(beta_min/beta));
+        }
 
-      if (mpi_nprocs() == 1) {
-        facs[n] = sqrt(beta_min/beta);
-        printf("fac[%i] = %e\n", n, sqrt(beta_min/beta));
-      }
-
-      // Rescale vector potential for this loop
-      ZSLOOP(0,N1,0,N2,0,0) {
-        coord(i, j, k, CORN, X);
-        bl_coord(X, &r, &th);
-        if (r > rmin && r < rmax) {
-          if (mpi_nprocs() > 1) {
-            A[i][j] *= facs[n];
-          } else {
-            A[i][j] *= sqrt(beta_min/beta);
+        // Rescale vector potential for this loop
+        ZSLOOP(0,N1,0,N2,0,0) {
+          coord(i, j, k, CORN, X);
+          bl_coord(X, &r, &th);
+          if (r > rmin && r < rmax) {
+            if (mpi_nprocs() > 1) {
+              A[i][j] *= facs[n];
+            } else {
+              A[i][j] *= sqrt(beta_min/beta);
+            }
           }
         }
+      }
+
+    } else {
+
+      double maxPhi = 0.;
+      double init_fluxes[(int)Nloops];
+
+      // try to keep fluxes the same in each loop
+      for (int n=0; n<Nloops; ++n) {
+
+        // get loop geometry
+        double rmin = exp(log(rstart) + n*ldrloop);
+        double rmax = exp(log(rstart) + (n+1)*ldrloop);
+
+        // calculate total flux inside of this loop and get min beta
+        double Phi_scaled = 0.;
+        ISLOOP(5, N1-1) {
+          JSLOOP(0, N2-1) {
+            int jglobal = j - NG + global_start[2];
+            int k = NG;
+            if (jglobal == N2TOT/2) {
+              coord(i, j, k, CENT, X);
+              bl_coord(X, &r, &th);
+              if (r > rmin && r < rmax) {
+                double B2net =  (A[i][j] + A[i][j+1] - A[i+1][j] - A[i+1][j+1])/
+                                (2.*dx[1]*ggeom[i][j][CENT].g);
+                Phi_scaled += ggeom[i][j][CENT].g*2.*M_PI*dx[1]*fabs(B2net);
+              }
+            }
+          }
+        }
+
+        init_fluxes[n] = mpi_reduce(Phi_scaled);
+        if (init_fluxes[n] > maxPhi) maxPhi = init_fluxes[n];
+      }
+
+      // now actually normalize
+      for (int n=0; n<Nloops; ++n) {
+
+        double rmin = exp(log(rstart) + n*ldrloop);
+        double rmax = exp(log(rstart) + (n+1)*ldrloop);
+        double normalization = maxPhi / init_fluxes[n] * 20.;
+
+        ZSLOOP(0,N1,0,N2,0,0) {
+          coord(i, j, k, CENT, X);
+          bl_coord(X, &r, &th);
+          if (r > rmin && r < rmax) {
+            A[i][j] *= normalization; 
+          }
+        }
+          
       }
     }
+
+
+
+    // 
+    // Housekeeping. Clean up primitives B.
+    //
 
     // Calculate B again
     ZLOOP {
@@ -494,7 +579,7 @@ void init_prob()
   if (MAD != 0) { // MAD
 
     // for MAD==6, TODO: add these to parameter files
-    double MAD6_rstart=0., MAD6_rend=0., MAD6_lambdaB, MAD6_U_rend_midplane, MAD6_frstart;
+    double MAD6_rstart=0., MAD6_rend=0., MAD6_lambdaB=0., MAD6_U_rend_midplane=0., MAD6_frstart=0.;
     double MAD6_U_midplane[N1+2*NG];
 
     // normalize density and internal energy. this is done here so as not to mess with 
@@ -554,7 +639,7 @@ void init_prob()
         } else if (MAD == 5) {
           q = pow(r/rin,3)*rho_av/rhomax - 0.2;
         } else if (MAD == 6) {
-          fr = 1./MAD6_lambdaB * ( pow(r,2./3) + 15.*pow(r,-2./5)/8 );
+          double fr = 1./MAD6_lambdaB * ( pow(r,2./3) + 15.*pow(r,-2./5)/8 );
           double Uc = P[i][j][k][UU] - MAD6_U_rend_midplane;
           double Ucm = MAD6_U_midplane[i] - MAD6_U_rend_midplane;
           q = pow(sin(th), 3.) * (Uc / Ucm - 0.2) / 0.8;
