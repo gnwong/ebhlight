@@ -26,6 +26,7 @@
 //  
 //  The static int "MAD" should be thought of as a "magnetic-field-type" flag. You should not attempt to
 //  read into the numbers. It's not worth it.
+//   MAD == 0:  Penna+ (see MAD6) - like magnetic field initial condition a la BRR.
 //   MAD == 1:  Standard SANE condition.
 //   MAD == 2:  Standard MAD condition.
 //   MAD == 3:  ??
@@ -322,18 +323,17 @@ void init_prob()
   // ============================================================================= //
 
   // Penna+ 2013 - like magnetic field
-  if (MAD == 0) {
+  if (MAD==0 || MAD==6) {
 
-    // print some diagnostic information to the terminal.
-    if (mpi_io_proc()) {
-      fprintf(stderr, "Nloops = %e\n", Nloops);
-    }
-
-    // default to the 25/550 disk. these numbers set the extent
-    // within which to generate a magnetic field. old values were
-    // 23 -> 374 for 20,41 and 12 -> 84 for 10,21.
-    double rstart = 25.;
-    double rend = 550.;
+    // these numbers are used to set the extent of the magnetic 
+    // field within the disk. magnetic field is set to be non-
+    // zero within the region (in the midplane) where density
+    // rho > BRHOMIN. old values were 23->374 for 20,41 large 
+    // disk and 12->84 for 10,21 medium disk.
+    double BRHOMIN_inside = 2.e-1;
+    double BRHOMIN_outside = 2.e-2;
+    double rstart = 0.;
+    double rend = 0.;
 
     // find rstart and rend. normalize along the way.
     ZSLOOP(-1, N1, -1, N2, -1, N3) {
@@ -342,24 +342,30 @@ void init_prob()
       P[i][j][k][RHO] /= rhomax;
       P[i][j][k][UU] /= rhomax;
 
-      /*
       // identify rstart and rend by rho > 0.2 condition. only
-      // run this on the true center zone. WARNING: DO NOT USE
-      // THIS METHOD. IT MIGHT END UP OVERRUNNING THE BOUNDS OF
-      // THE SIMULATION!
+      // run this on true midplane zones.
       int jglobal = j - NG + global_start[2];
       if (jglobal == N2TOT/2) {
-        if (trstart==0. && P[i][j][k][RHO] > 0.2) {
-          coord(i,j,k, FACE1, X);
-          bl_coord(X, &rstart, &th);
-        } else if (P[i][j][k][RHO] < 0.2) {
+        if (rstart==0.) {
+          if (P[i][j][k][RHO]>BRHOMIN_inside) {
+            coord(i,j,k, FACE1, X);
+            bl_coord(X, &rstart, &th);
+          }
+        } else if (rend==0. && P[i][j][k][RHO]<BRHOMIN_outside) {
           coord(i,j,k, CENT, X);
           bl_coord(X, &rend, &th);
         }
       }
-      */
     }
 
+    // print some diagnostic information ot the terminal
+    if (mpi_io_proc()) {
+      fprintf(stderr, "Problem file: torus\n  MAD: %d\n", MAD);
+      fprintf(stderr, "  Nloops: %d\n  rstart: %g\n", (int)Nloops, rstart);
+      fprintf(stderr, "  rend: %g\n", rend);
+      fprintf(stderr, "\n");
+    }
+    
     // update rho, uu max values now that they're normalized.
     umax /= rhomax;
     rhomax = 1.;
@@ -405,10 +411,11 @@ void init_prob()
       coord(i, j, k, CORN, X);
       bl_coord(X, &r, &th);
 
-      if (1 == 0) {
+      q = 0.;
+      if (MAD == 0) {
         // this is the BRR alternative
         q = r/rstart*rho_av/rhomax - 0.2;
-      } else {
+      } else if (MAD == 6) {
         int iglobal = i - NG + global_start[1];
         double Ucm = u_m[iglobal] - u_cm;
         double Uc = uu_av - u_cm;
@@ -458,7 +465,7 @@ void init_prob()
 
     double ldrloop = (log(rend) - log(rstart))/Nloops;
 
-    if (1 == 0) {
+    if (MAD == 0) {
       // bound by plasma beta
       double facs[(int)Nloops];
 
@@ -503,13 +510,17 @@ void init_prob()
         }
       }
 
-    } else {
+    } else if (MAD == 6) {
 
       double maxPhi = 0.;
       double init_fluxes[(int)Nloops];
+      double min_betas[(int)Nloops];
 
       // try to keep fluxes the same in each loop
       for (int n=0; n<Nloops; ++n) {
+
+        // set beta absurdly high
+        min_betas[n] = 1.e100;
 
         // get loop geometry
         double rmin = exp(log(rstart) + n*ldrloop);
@@ -521,29 +532,52 @@ void init_prob()
           JSLOOP(0, N2-1) {
             int jglobal = j - NG + global_start[2];
             int k = NG;
+
+            // only compute for midplane
             if (jglobal == N2TOT/2) {
+
               coord(i, j, k, CENT, X);
               bl_coord(X, &r, &th);
+
+              // only consider in the loop
               if (r > rmin && r < rmax) {
+
+                // compute flux through midplane (field symmetry forces orthogonality)
                 double B2net =  (A[i][j] + A[i][j+1] - A[i+1][j] - A[i+1][j+1])/
                                 (2.*dx[1]*ggeom[i][j][CENT].g);
                 Phi_scaled += ggeom[i][j][CENT].g*2.*M_PI*dx[1]*fabs(B2net);
+                
+                // compute beta (we set P before this normalization step)
+                geom = get_geometry(i, j, k, CENT) ;
+                double bsq_ij = bsq_calc(P[i][j][k], geom);
+                double beta_ij = (gam - 1.)*P[i][j][k][UU]/(0.5*bsq_ij);
+                if (beta_ij < min_betas[n]) min_betas[n] = beta_ij;
               }
             }
           }
         }
 
         init_fluxes[n] = mpi_reduce(Phi_scaled);
+        min_betas[n] = mpi_min(min_betas[n]);
         if (init_fluxes[n] > maxPhi) maxPhi = init_fluxes[n];
       }
 
       // now actually normalize
       for (int n=0; n<Nloops; ++n) {
 
+        // a kludge, to be sure, but a welcome(?) one.
+        double sizefact = 20.;
+        if (rin < 15) sizefact = 1.;
+
         double rmin = exp(log(rstart) + n*ldrloop);
         double rmax = exp(log(rstart) + (n+1)*ldrloop);
-        double normalization = maxPhi / init_fluxes[n] * 20.;
-
+        double normalization = maxPhi / init_fluxes[n] * sizefact;
+        // the extra factor at the end of the normalization can be
+        // used to adjust the overall (e.g.) beta everywhere. this
+        // is nomially 1. for medium disks and 20. for large disks
+        // (10,20 vs 20,41). decreasing this factor will result in 
+        // an increase in the overall minimum beta per loop.
+        
         ZSLOOP(0,N1,0,N2,0,0) {
           coord(i, j, k, CENT, X);
           bl_coord(X, &r, &th);
@@ -555,16 +589,11 @@ void init_prob()
       }
     }
 
-
-
-    // 
-    // Housekeeping. Clean up primitives B.
-    //
-
-    // Calculate B again
+    // ==================================== //
+    // Housekeeping. Clean up B primitives. //
+    // ==================================== //
     ZLOOP {
       geom = get_geometry(i, j, k, CENT) ;
-
       // Flux-ct
       P[i][j][k][B1] = -(A[i][j] - A[i][j + 1]
           + A[i + 1][j] - A[i + 1][j + 1]) /
@@ -576,11 +605,7 @@ void init_prob()
   } 
 
 
-  if (MAD != 0) { // MAD
-
-    // for MAD==6, TODO: add these to parameter files
-    double MAD6_rstart=0., MAD6_rend=0., MAD6_lambdaB=0., MAD6_U_rend_midplane=0., MAD6_frstart=0.;
-    double MAD6_U_midplane[N1+2*NG];
+  if (MAD != 0 && MAD != 6) {  // begin MAD = {1,2,3,4,5} block
 
     // normalize density and internal energy. this is done here so as not to mess with 
     // previous definitions and code flow
@@ -592,28 +617,6 @@ void init_prob()
     rhomax = 1.;
     fixup(P);
     bound_prim(P);
-
-    // run through the grid once to identify fluid parameters that might be needed in
-    // setting up the magnetic field.
-    ZSLOOP(0, N1, N2/2, N2/2, 0, 0) {
-      if (MAD == 6) {
-
-        coord(i, j, k, CORN, X);
-        bl_coord(X, &r, &th);
-
-        if ( P[i][j][k][RHO] > 0.2 ) {
-          if (MAD6_rstart == 0.) MAD6_rstart = r;
-        } else {
-          if (MAD6_rstart > 0. && MAD6_rend == 0.) {
-            MAD6_rend = r;
-            MAD6_U_rend_midplane = P[i][j][k][UU];
-          }
-        }
-
-        MAD6_U_midplane[i] = P[i][j][k][UU];
-      }
-    }
-    MAD6_frstart = 1./MAD6_lambdaB * ( pow(MAD6_rstart,2./3) + 15.*pow(MAD6_rstart,-2./5)/8 );
 
     // now we start to set up the magnetic field by first finding the corner-centered
     // vector potential.
@@ -638,13 +641,6 @@ void init_prob()
           q = pow(r/rin,2)*rho_av/rhomax - 0.2;
         } else if (MAD == 5) {
           q = pow(r/rin,3)*rho_av/rhomax - 0.2;
-        } else if (MAD == 6) {
-          double fr = 1./MAD6_lambdaB * ( pow(r,2./3) + 15.*pow(r,-2./5)/8 );
-          double Uc = P[i][j][k][UU] - MAD6_U_rend_midplane;
-          double Ucm = MAD6_U_midplane[i] - MAD6_U_rend_midplane;
-          q = pow(sin(th), 3.) * (Uc / Ucm - 0.2) / 0.8;
-          if (q < 0) q = 0.;
-          q *= sin( fr - MAD6_frstart );
         } else {
           printf("MAD = %i not supported!\n", MAD);
           exit(-1);
@@ -688,7 +684,7 @@ void init_prob()
       P[i][j][k][B1] *= norm;
       P[i][j][k][B2] *= norm;
     }
-  } 
+  }  // end MAD = {1,2,3,4,5} block
 
 
   // ================================================================= //
