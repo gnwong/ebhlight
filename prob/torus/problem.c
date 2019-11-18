@@ -332,7 +332,7 @@ void init_prob()
     // disk and 12->84 for 10,21 medium disk.
     double BRHOMIN_inside = 2.e-1;
     double BRHOMIN_outside = 2.e-2;
-    double rstart = 0.;
+    double rstart = 1.e10;
     double rend = 0.;
 
     // find rstart and rend. normalize along the way.
@@ -346,7 +346,7 @@ void init_prob()
       // run this on true midplane zones.
       int jglobal = j - NG + global_start[2];
       if (jglobal == N2TOT/2) {
-        if (rstart==0.) {
+        if (rstart==1.e10) {
           if (P[i][j][k][RHO]>BRHOMIN_inside) {
             coord(i,j,k, FACE1, X);
             bl_coord(X, &rstart, &th);
@@ -357,6 +357,9 @@ void init_prob()
         }
       }
     }
+
+    rstart = mpi_min(rstart);
+    rend = mpi_max(rend);
 
     // print some diagnostic information ot the terminal
     if (mpi_io_proc()) {
@@ -567,7 +570,7 @@ void init_prob()
 
         // a kludge, to be sure, but a welcome(?) one.
         double sizefact = 20.;
-        if (rin < 15) sizefact = 1.;
+        if (rin < 15) sizefact = 4.;
 
         double rmin = exp(log(rstart) + n*ldrloop);
         double rmax = exp(log(rstart) + (n+1)*ldrloop);
