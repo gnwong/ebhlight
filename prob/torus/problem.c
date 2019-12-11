@@ -379,6 +379,8 @@ void init_prob()
     // properly normalized, find u_cm and u_m[...]
     double u_cm = 0.;
     double u_m[N1TOT];
+    for (int i=0; i<N1TOT; ++i) u_m[i] = 0.;
+
     ZSLOOP(0, N1, 0, N2, 0, 0) {
       
       int iglobal = i - NG + global_start[1];
